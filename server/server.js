@@ -60,6 +60,8 @@ import notificationsRouter from "./routes/notifications.js";
 import paymentroute from "./routes/payment/payment.js";
 import verifyQRRoutes from "./routes/payment/verifyQr.js";
 import paymentVerify from "./routes/payment/paymentVerify.js";
+import { webhookRouter } from "./routes/payment/paymentVerify.js";
+import { cancelExpiredChapaOrders } from "./helpers/order-stock.js";
 
 import { notifyAllLowOrOutOfStockProducts } from "./controllers/productRequest-controller.js";
 
@@ -94,7 +96,6 @@ app.use(
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cookieParser());
-app.use(express.json({ limit: "1mb" }));
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -112,6 +113,9 @@ const paymentLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: "Too many payment attempts. Please try again later." },
 });
+
+app.use("/api/payment/webhook", express.raw({ type: "application/json", limit: "1mb" }), webhookRouter);
+app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (req, res) =>
   res.json({ success: true, status: "ok", uptime: process.uptime() })
@@ -210,6 +214,10 @@ const start = async () => {
     console.error("MONGODB_URI is not set. Refusing to start.");
     process.exit(1);
   }
+  if (process.env.NODE_ENV === "production" && !process.env.API_PUBLIC_URL) {
+    console.error("API_PUBLIC_URL is required in production. Refusing to start.");
+    process.exit(1);
+  }
 
   try {
     await mongoose.connect(process.env.MONGODB_URI);
@@ -224,6 +232,16 @@ const start = async () => {
   } catch (error) {
     console.warn("Low-stock notification check skipped:", error.message);
   }
+
+  const stockSweep = async () => {
+    try {
+      await cancelExpiredChapaOrders();
+    } catch (error) {
+      console.error("Expired order stock sweep error:", error.message);
+    }
+  };
+  await stockSweep();
+  setInterval(stockSweep, 5 * 60 * 1000);
 
   app.listen(PORT, () => console.log(`Server is now running on port ${PORT}`));
 };
