@@ -5,6 +5,7 @@ const initialState = {
   approvalURL: null,
   isLoading: false,
   orderId: null,
+  orderIds: [],
   orderList: [],
   orderDetails: null,
 };
@@ -83,16 +84,15 @@ const shoppingOrderSlice = createSlice({
       .addCase(createNewOrder.fulfilled, (state, action) => {
         state.isLoading = false;
         state.approvalURL = action.payload.approvalURL || null;
-        state.orderId = action.payload.orderIds?.[0] || action.payload.orderId;
-        sessionStorage.setItem(
-          "currentOrderId",
-          JSON.stringify(state.orderId)
-        );
+        state.orderIds = action.payload.orderIds || (action.payload.orderId ? [action.payload.orderId] : []);
+        state.orderId = state.orderIds[0] || null;
+        sessionStorage.setItem("currentOrderIds", JSON.stringify(state.orderIds));
       })
       .addCase(createNewOrder.rejected, (state) => {
         state.isLoading = false;
         state.approvalURL = null;
         state.orderId = null;
+        state.orderIds = [];
       })
       .addCase(getAllOrdersByUserId.pending, (state) => {
         state.isLoading = true;

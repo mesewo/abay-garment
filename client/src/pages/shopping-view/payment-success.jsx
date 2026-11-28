@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDispatch } from "react-redux";
 import axios from "axios";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -13,11 +13,12 @@ export default function PaymentSuccess() {
   const navigate = useNavigate();
   const [status, setStatus] = useState("Verifying payment...");
   const [error, setError] = useState(null);
-  const [orderId, setOrderId] = useState(null);
+  const [orderIds, setOrderIds] = useState([]);
+  const verificationStarted = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
-
+    if (verificationStarted.current) return;
+    verificationStarted.current = true;
     const verify = async () => {
       const reference =
         searchParams.get("tx_ref") || localStorage.getItem("last_tx_ref");
@@ -30,21 +31,18 @@ export default function PaymentSuccess() {
 
       try {
         const { data } = await axios.post("/api/payment/verify", { reference });
-        if (cancelled) return;
-
-        if (!data.success || !data.orderId) {
+        if (!data.success || !data.orderIds?.length) {
           setError(data.error || "We could not verify this payment.");
           setStatus(null);
           return;
         }
 
-        setOrderId(data.orderId);
+        setOrderIds(data.orderIds);
         setStatus(null);
         localStorage.removeItem("last_tx_ref");
         dispatch(clearCart());
         dispatch(clearBulkCart());
       } catch (err) {
-        if (cancelled) return;
         setError(
           err.response?.data?.error || "Failed to verify payment. Please contact support."
         );
@@ -53,9 +51,6 @@ export default function PaymentSuccess() {
     };
 
     verify();
-    return () => {
-      cancelled = true;
-    };
   }, [dispatch, searchParams]);
 
   if (error) {
@@ -82,14 +77,15 @@ export default function PaymentSuccess() {
         later under Account &gt; Orders.
       </p>
       <div className="rounded-xl bg-white p-4 shadow-md">
-        <QRCode
-          value={String(orderId)}
-          style={{ height: "auto", maxWidth: "220px", width: "100%" }}
-        />
+        <div className="flex flex-wrap justify-center gap-4">
+          {orderIds.map((id) => (
+            <div key={id} className="flex flex-col items-center gap-2">
+              <QRCode value={String(id)} style={{ height: "auto", maxWidth: "220px", width: "100%" }} />
+              <span className="font-mono text-xs text-muted-foreground">Order {String(id).slice(-8)}</span>
+            </div>
+          ))}
+        </div>
       </div>
-      <p className="mt-3 font-mono text-xs text-muted-foreground">
-        Order {String(orderId).slice(-8)}
-      </p>
       <div className="mt-6 flex gap-3">
         <Button onClick={() => navigate("/shop/account")}>View my orders</Button>
         <Button variant="outline" onClick={() => navigate("/shop/home")}>

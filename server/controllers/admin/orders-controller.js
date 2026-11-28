@@ -1,4 +1,5 @@
 import Order from "../../models/Order.js";
+import { releaseOrderStock } from "../../helpers/order-stock.js";
 
 export const getAllOrdersOfAllUsers = async (req, res) => {
   try {
@@ -76,6 +77,7 @@ export const updateOrderStatus = async (req, res) => {
     order.orderStatus = orderStatus;
     order.orderUpdateDate = new Date();
     await order.save();
+    if (["cancelled", "rejected"].includes(orderStatus)) await releaseOrderStock(order);
 
     res.status(200).json({
       success: true,

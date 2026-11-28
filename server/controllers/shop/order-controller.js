@@ -4,6 +4,8 @@ import Cart from "../../models/Cart.js";
 import Product from "../../models/Product.js";
 import StoreProduct from "../../models/StoreProduct.js";
 import User from "../../models/User.js";
+import BulkCart from "../../models/BulkCart.js";
+import ProductRequest from "../../models/ProductRequest.js";
 
 const toPositiveInt = (value) => {
   const number = Number(value);
@@ -20,25 +22,30 @@ const unitPriceOf = (product) =>
  */
 const reserveStock = async (lines) => {
   const reserved = [];
+  try {
+    for (const line of lines) {
+      const storeUpdate = await StoreProduct.findOneAndUpdate(
+        { _id: line.storeProductId, quantity: { $gte: line.quantity } },
+        { $inc: { quantity: -line.quantity } },
+        { new: true }
+      );
 
-  for (const line of lines) {
-    const storeUpdate = await StoreProduct.findOneAndUpdate(
-      { _id: line.storeProductId, quantity: { $gte: line.quantity } },
-      { $inc: { quantity: -line.quantity } },
-      { new: true }
-    );
+      if (!storeUpdate) {
+        await releaseStock(reserved);
+        return { ok: false, message: `Not enough stock for ${line.title}.` };
+      }
 
-    if (!storeUpdate) {
-      await releaseStock(reserved);
-      return { ok: false, message: `Not enough stock for ${line.title}.` };
+      const reservation = { ...line, soldCountReserved: false };
+      reserved.push(reservation);
+      await Product.updateOne(
+        { _id: line.productId },
+        { $inc: { soldCount: line.quantity } }
+      );
+      reservation.soldCountReserved = true;
     }
-
-    await Product.updateOne(
-      { _id: line.productId },
-      { $inc: { soldCount: line.quantity } }
-    );
-
-    reserved.push(line);
+  } catch (error) {
+    await releaseStock(reserved);
+    throw error;
   }
 
   return { ok: true };
@@ -50,18 +57,29 @@ const releaseStock = async (lines) => {
       { _id: line.storeProductId },
       { $inc: { quantity: line.quantity } }
     );
-    await Product.updateOne(
-      { _id: line.productId },
-      { $inc: { soldCount: -line.quantity } }
-    );
+    if (line.soldCountReserved !== false) {
+      await Product.updateOne(
+        { _id: line.productId },
+        { $inc: { soldCount: -line.quantity } }
+      );
+    }
   }
 };
 
 export const createOrder = async (req, res) => {
+  let reservedLines = [];
+  let stockReserved = false;
+  const createdOrderIds = [];
   try {
     // Owner is always the authenticated user, never a client supplied id.
     const userId = req.user.id;
-    const { cartId, cartItems, addressInfo, paymentMethod, isBulk } = req.body;
+    const { cartId, requestId, cartItems, addressInfo, paymentMethod } = req.body;
+    const normalCart = cartId ? await Cart.findOne({ _id: cartId, userId }) : null;
+    const bulkCart = cartId ? await BulkCart.findOne({ _id: cartId, userId }) : null;
+    const approvedBulkRequest = requestId
+      ? await ProductRequest.findOne({ _id: requestId, requestedBy: userId, status: "approved", isBulk: true })
+      : null;
+    const isBulk = Boolean(bulkCart || normalCart?.isBulk || approvedBulkRequest);
 
     if (!Array.isArray(cartItems) || cartItems.length === 0) {
       return res
@@ -130,10 +148,12 @@ export const createOrder = async (req, res) => {
       });
     }
 
+    reservedLines = lines;
     const stockResult = await reserveStock(lines);
     if (!stockResult.ok) {
       return res.status(409).json({ success: false, message: stockResult.message });
     }
+    stockReserved = true;
 
     const ordersMap = new Map();
     for (const line of lines) {
@@ -147,6 +167,7 @@ export const createOrder = async (req, res) => {
       : null;
 
     const createdOrders = [];
+    const tx_ref = `checkout_${crypto.randomUUID()}`;
     for (const items of ordersMap.values()) {
       const { storeId, sellerId } = items[0];
       const orderItems = items.map((item) => ({
@@ -161,6 +182,7 @@ export const createOrder = async (req, res) => {
         (sum, item) => sum + item.price * item.quantity,
         0
       );
+      const roundedTotalAmount = Number(totalAmount.toFixed(2));
 
       const order = await Order.create({
         userId,
@@ -174,7 +196,7 @@ export const createOrder = async (req, res) => {
           phone: addressInfo.phone,
           notes: addressInfo.notes,
         },
-        totalAmount,
+        totalAmount: roundedTotalAmount,
         paymentMethod: paymentMethod === "chapa" ? "chapa" : "cash",
         paymentStatus: "pending",
         orderStatus: "pending",
@@ -182,12 +204,19 @@ export const createOrder = async (req, res) => {
         orderUpdateDate: new Date(),
         store: storeId,
         seller: sellerId,
-        tx_ref: `order_${crypto.randomUUID()}`,
+        tx_ref,
+        ...(paymentMethod === "chapa" ? { expiresAt: new Date(Date.now() + 30 * 60 * 1000) } : {}),
+        reservedStock: items.map((item) => ({
+          storeProductId: item.storeProductId,
+          productId: item.productId,
+          quantity: item.quantity,
+        })),
         type: isBulk ? "bulk" : "normal",
         storekeeper: storekeeperUser?._id,
       });
 
       createdOrders.push(order);
+      createdOrderIds.push(order._id);
     }
 
     // Only delete a cart that actually belongs to the caller.
@@ -203,6 +232,14 @@ export const createOrder = async (req, res) => {
       orders: createdOrders,
     });
   } catch (error) {
+    if (stockReserved) {
+      try {
+        await Order.deleteMany({ _id: { $in: createdOrderIds } });
+        await releaseStock(reservedLines);
+      } catch (compensationError) {
+        console.error("Create order stock compensation error:", compensationError);
+      }
+    }
     console.error("Create order error:", error);
     return res
       .status(500)

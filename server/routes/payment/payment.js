@@ -7,10 +7,10 @@ const router = express.Router();
 
 router.post("/initiate", requireAuth, async (req, res) => {
   try {
-    const { orderId } = req.body;
+    const { orderId, tx_ref } = req.body;
 
-    if (!orderId) {
-      return res.status(400).json({ success: false, message: "Order id is required." });
+    if (!orderId && !tx_ref) {
+      return res.status(400).json({ success: false, message: "Transaction reference or order id is required." });
     }
     if (!process.env.CHAPA_SECRET_KEY) {
       return res
@@ -18,24 +18,28 @@ router.post("/initiate", requireAuth, async (req, res) => {
         .json({ success: false, message: "Payment provider is not configured." });
     }
 
-    const order = await Order.findById(orderId);
-    if (!order) {
+    const firstOrder = tx_ref
+      ? await Order.findOne({ tx_ref })
+      : await Order.findById(orderId);
+    if (!firstOrder) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
-    if (String(order.userId) !== req.user.id) {
+    const reference = firstOrder.tx_ref;
+    const orders = await Order.find({ tx_ref: reference });
+    if (!orders.length || !orders.every((order) => String(order.userId) === req.user.id)) {
       return res
         .status(403)
         .json({ success: false, message: "You cannot pay for this order." });
     }
-    if (order.paymentStatus === "paid") {
+    const now = new Date();
+    if (orders.some((order) => order.paymentStatus !== "pending" || order.paymentMethod !== "chapa" || order.orderStatus !== "pending" || (order.expiresAt && order.expiresAt <= now))) {
       return res
         .status(409)
-        .json({ success: false, message: "This order has already been paid." });
+        .json({ success: false, message: "These orders are not available for payment." });
     }
 
-    // Amount always comes from the server-side order total.
-    const amount = order.totalAmount;
-    if (!amount || amount <= 0) {
+    const amount = Number(orders.reduce((sum, order) => sum + Number(order.totalAmount), 0).toFixed(2));
+    if (!Number.isFinite(amount) || amount <= 0) {
       return res
         .status(400)
         .json({ success: false, message: "Order total is invalid." });
@@ -53,16 +57,14 @@ router.post("/initiate", requireAuth, async (req, res) => {
         email: req.user.email,
         first_name: firstName,
         last_name: lastName,
-        tx_ref: order.tx_ref,
+        tx_ref: reference,
         return_url: `${clientUrl}/shop/payment-success?from=chapa`,
+        ...(process.env.API_PUBLIC_URL ? { callback_url: `${process.env.API_PUBLIC_URL.replace(/\/$/, "")}/api/payment/webhook` } : {}),
       },
       {
         headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
       }
     );
-
-    order.paymentMethod = "chapa";
-    await order.save();
 
     return res.json(response.data);
   } catch (error) {

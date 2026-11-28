@@ -14,9 +14,7 @@ export default function ShoppingCheckout() {
   const navigate = useNavigate();
   const { cartItems } = useSelector((state) => state.shopCart);
   const { user } = useSelector((state) => state.auth);
-  const { approvalURL, error: orderError } = useSelector(
-    (state) => state.shopOrder
-  );
+  const { approvalURL } = useSelector((state) => state.shopOrder);
   const [currentSelectedAddress, setCurrentSelectedAddress] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const isBulkCheckout = useSelector((state) => state.shopCart.isBulk);
@@ -76,10 +74,8 @@ export default function ShoppingCheckout() {
 
       const orderResponse = await dispatch(createNewOrder(orderData)).unwrap();
 
-      const orderId = Array.isArray(orderResponse.orderIds)
-        ? orderResponse.orderIds[0]
-        : orderResponse.orderId;
-      if (!orderId) {
+      const tx_ref = orderResponse.tx_refs?.[0];
+      if (!tx_ref) {
         toast({
           title: "Order ID not found after order creation.",
           variant: "destructive",
@@ -88,9 +84,7 @@ export default function ShoppingCheckout() {
         return;
       }
 
-      const tx_ref = orderResponse.tx_refs?.[0];
-
-      const { data } = await axios.post("/api/payment/initiate", { orderId });
+      const { data } = await axios.post("/api/payment/initiate", { tx_ref });
 
       if (data.data?.checkout_url) {
         if (tx_ref) localStorage.setItem("last_tx_ref", tx_ref);
@@ -104,7 +98,10 @@ export default function ShoppingCheckout() {
       }
     } catch (error) {
       toast({
-        title: error.message || "Failed to place order.",
+        title: String(error.message || error).toLowerCase().includes("stock") || String(error.message || error).toLowerCase().includes("available")
+          ? "Some items became unavailable"
+          : error.message || "Failed to place order.",
+        description: error.message || String(error),
         variant: "destructive",
       });
       setIsSubmitting(false);
